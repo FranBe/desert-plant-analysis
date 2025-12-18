@@ -1,0 +1,159 @@
+// ImageJ macro: compute HSVVI and HSVGVI per Song et al. (2023)
+// - Converts current RGB image to HSV
+// - Boosts S and V by 15% (caps at 1.0)
+// - Converts back to RGB => "HSVVI"
+// - Builds channel-enhanced image per Eq.(6): R' = R_hsvvi * G_hsvvi, G' = G_hsvvi * 2, B' = B_hsvvi => "HSVGVI_RGB"
+// - Also produces a simple normalized single-band HSVGVI index = (G' - R')/(G' + R') scaled to 0..255 => "HSVGVI_index"
+// The macro follows Equations (3)-(6) in Song et al. 2023. 
+
+if (isOpen("")) exit("No image open.");
+id = getImageID();
+title = getTitle();
+run("RGB Color"); // ensure image is RGB
+width = getWidth();
+height = getHeight();
+
+// create output images
+newImage("HSVVI", "RGB", width, height, 1);
+HSVid = getImageID();
+selectImage(id);
+
+newImage("HSVGVI_RGB", "RGB", width, height, 1);
+HSVGid = getImageID();
+
+newImage("HSVGVI_index", "16-bit", width, height, 1);
+IDXid = getImageID();
+
+// helper: clamp float to 0..255 and return int
+function clamp255(v) {
+    if (v < 0) return 0;
+    if (v > 255) return 255;
+    return round(v);
+}
+
+// main loop
+for (y = 0; y < height; y++) {
+    for (x = 0; x < width; x++) {
+        // read original RGB (0..255)
+        getPixel(x, y, pix);
+        R = pix[0];
+        G = pix[1];
+        B = pix[2];
+
+        // -- Eq(3): normalize to 0..1
+        Rn = R/255.0;
+        Gn = G/255.0;
+        Bn = B/255.0;
+
+        Cmax = max(Rn, Gn, Bn);
+        Cmin = min(Rn, Gn, Bn);
+        delta = Cmax - Cmin;
+
+        // -- Eq(4): Hue H (degrees)
+        if (delta == 0) {
+            H = 0.0;
+        } else if (Cmax == Rn) {
+            H = 60.0 * ( (Gn - Bn) / delta + 0.0 );
+        } else if (Cmax == Gn) {
+            H = 60.0 * ( (Bn - Rn) / delta + 2.0 );
+        } else {
+            H = 60.0 * ( (Rn - Gn) / delta + 4.0 );
+        }
+        if (H < 0) H = H + 360.0; // ensure 0..360
+
+        // -- Eq(4): Saturation & Value
+        if (Cmax == 0) {
+            S = 0.0;
+        } else {
+            S = delta / Cmax;
+        }
+        V = Cmax;
+
+        // -- Increase S and V by 15% (cap at 1.0) per paper
+        S = S * 1.15;
+        if (S > 1.0) S = 1.0;
+        V = V * 1.15;
+        if (V > 1.0) V = 1.0;
+
+        // -- Eq(5): compute C, X, m
+        C = V * S;
+        // compute ((H/60) mod 2)
+        Hv60 = H / 60.0;
+        mod2 = Hv60 - 2.0 * floor(Hv60 / 2.0); // value in [0,2)
+        X = C * (1.0 - abs(mod2 - 1.0));
+        m = V - C;
+
+        // -- compute intermediate (r', g', b') per sector
+        if (H >= 0 && H < 60) {
+            rp = C; gp = X; bp = 0;
+        } else if (H < 120) {
+            rp = X; gp = C; bp = 0;
+        } else if (H < 180) {
+            rp = 0; gp = C; bp = X;
+        } else if (H < 240) {
+            rp = 0; gp = X; bp = C;
+        } else if (H < 300) {
+            rp = X; gp = 0; bp = C;
+        } else {
+            rp = C; gp = 0; bp = X;
+        }
+
+        // final HSVVI RGB in 0..255
+        R_hsvvi = (rp + m) * 255.0;
+        G_hsvvi = (gp + m) * 255.0;
+        B_hsvvi = (bp + m) * 255.0;
+
+        R_hsvvi_i = clamp255(R_hsvvi);
+        G_hsvvi_i = clamp255(G_hsvvi);
+        B_hsvvi_i = clamp255(B_hsvvi);
+
+        // write to HSVVI image
+        selectImage(HSVid);
+        setPixel(x, y, newArray(R_hsvvi_i, G_hsvvi_i, B_hsvvi_i));
+
+        // -- Eq(6): channel enhancement per paper (interpretation):
+        // newR = R_hsvvi * G_hsvvi (multiply channels)
+        // newG = G_hsvvi * 2 (enhance green by factor 2)
+        // newB = B_hsvvi (unchanged)
+        // (This implements the channel mixing described in Eq. (6) of the paper.)
+        newR = R_hsvvi * (G_hsvvi / 255.0); // scale product back into 0..255
+        newG = G_hsvvi * 2.0;
+        newB = B_hsvvi;
+
+        newR_i = clamp255(newR);
+        newG_i = clamp255(newG);
+        newB_i = clamp255(newB);
+
+        // write to HSVGVI_RGB image
+        selectImage(HSVGid);
+        setPixel(x, y, newArray(newR_i, newG_i, newB_i));
+
+        // Produce a single-band normalized index (optional)
+        // Index = (G' - R') / (G' + R')  -> range [-1,1] ; map to [0,65535] for 16-bit display
+        denom = (newG + newR);
+        if (denom == 0) {
+            idx = 0.0;
+        } else {
+            idx = (newG - newR) / denom; // -1..1
+        }
+        // map to 0..65535
+        idx_mapped = (idx + 1.0) / 2.0 * 65535.0;
+        if (idx_mapped < 0) idx_mapped = 0;
+        if (idx_mapped > 65535) idx_mapped = 65535;
+
+        selectImage(IDXid);
+        setPixel(x, y, idx_mapped);
+        selectImage(id); // restore original image id for next getPixel
+    }
+}
+
+// show results
+selectImage(HSVid);
+run("Enhance Contrast", "saturated=0.35");
+selectImage(HSVGid);
+run("Enhance Contrast", "saturated=0.35");
+selectImage(IDXid);
+run("Enhance Contrast", "saturated=0.35");
+selectImage(id);
+
+print("Done: produced images: HSVVI, HSVGVI_RGB, HSVGVI_index.");

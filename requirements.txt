@@ -1,0 +1,4 @@
+numpy 
+pillow 
+typing 
+opencv-python
